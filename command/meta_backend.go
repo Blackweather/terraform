@@ -514,12 +514,19 @@ func (m *Meta) backendFromConfig(opts *BackendOpts) (backend.Backend, tfdiags.Di
 	// We're unsetting a backend (moving from backend => local)
 	case c == nil && !s.Backend.Empty():
 		log.Printf("[TRACE] Meta.Backend: previously-initialized %q backend is no longer present in config", s.Backend.Type)
+
+		initReason := fmt.Sprintf("Unsetting the previously set backend %q", s.Backend.Type)
 		if !opts.Init {
-			initReason := fmt.Sprintf(
-				"Unsetting the previously set backend %q",
-				s.Backend.Type)
-			m.backendInitRequired(initReason)
-			diags = diags.Append(errBackendInitRequired)
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Backend init required, please run \"terraform init\"",
+				fmt.Sprintf(strings.TrimSpace(errBackendInit), initReason),
+			))
+			return nil, diags
+		}
+
+		if !m.migrateState {
+			diags = diags.Append(migrateOrReconfigDiag)
 			return nil, diags
 		}
 
@@ -529,11 +536,12 @@ func (m *Meta) backendFromConfig(opts *BackendOpts) (backend.Backend, tfdiags.Di
 	case c != nil && s.Backend.Empty():
 		log.Printf("[TRACE] Meta.Backend: moving from default local state only to %q backend", c.Type)
 		if !opts.Init {
-			initReason := fmt.Sprintf(
-				"Initial configuration of the requested backend %q",
-				c.Type)
-			m.backendInitRequired(initReason)
-			diags = diags.Append(errBackendInitRequired)
+			initReason := fmt.Sprintf("Initial configuration of the requested backend %q", c.Type)
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Backend init required, please run \"terraform init\"",
+				fmt.Sprintf(strings.TrimSpace(errBackendInit), initReason),
+			))
 			return nil, diags
 		}
 
@@ -558,12 +566,22 @@ func (m *Meta) backendFromConfig(opts *BackendOpts) (backend.Backend, tfdiags.Di
 		}
 		log.Printf("[TRACE] Meta.Backend: backend configuration has changed (from type %q to type %q)", s.Backend.Type, c.Type)
 
+		initReason := fmt.Sprintf("Backend configuration changed for %q", c.Type)
+		if s.Backend.Type != c.Type {
+			initReason = fmt.Sprintf("Backend configuration changed from %q to %q", s.Backend.Type, c.Type)
+		}
+
 		if !opts.Init {
-			initReason := fmt.Sprintf(
-				"Backend configuration changed for %q",
-				c.Type)
-			m.backendInitRequired(initReason)
-			diags = diags.Append(errBackendInitRequired)
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Backend init required, please run \"terraform init\"",
+				fmt.Sprintf(strings.TrimSpace(errBackendInit), initReason),
+			))
+			return nil, diags
+		}
+
+		if !m.migrateState {
+			diags = diags.Append(migrateOrReconfigDiag)
 			return nil, diags
 		}
 
@@ -766,6 +784,11 @@ func (m *Meta) backend_C_r_s(c *configs.Backend, cHash int, sMgr *clistate.Local
 	}
 
 	if len(localStates) > 0 {
+		if !m.migrateState {
+			diags = diags.Append(migrateOrReconfigDiag)
+			return nil, diags
+		}
+
 		// Perform the migration
 		err = m.backendMigrateState(&backendMigrateOpts{
 			OneType: "local",
@@ -1205,8 +1228,7 @@ and try again.
 `
 
 const errBackendInit = `
-[reset][bold][yellow]Backend reinitialization required. Please run "terraform init".[reset]
-[yellow]Reason: %s
+Reason: %s
 
 The "backend" is the interface that Terraform uses to store state,
 perform operations, etc. If this message is showing up, it means that the
@@ -1214,8 +1236,9 @@ Terraform configuration you're using is using a custom configuration for
 the Terraform backend.
 
 Changes to backend configurations require reinitialization. This allows
-Terraform to set up the new configuration, copy existing state, etc. This is
-only done during "terraform init". Please run that command now then try again.
+Terraform to set up the new configuration, copy existing state, etc. Please run
+"terraform init" with either the "-reconfigure" or "-migrate-state" flags to
+use the current configuration.
 
 If the change reason above is incorrect, please verify your configuration
 hasn't changed and try again. At this point, no changes to your existing
@@ -1254,3 +1277,10 @@ const successBackendSet = `
 Successfully configured the backend %q! Terraform will automatically
 use this backend unless the backend configuration changes.
 `
+
+var migrateOrReconfigDiag = tfdiags.Sourceless(
+	tfdiags.Error,
+	"Backend configuration changed",
+	"A change in the backend configuration has been detected, which may require migrating existing state.\n\n"+
+		"If you wish to attempt automatic migration of the state, use \"terraform init -migrate-state\".\n"+
+		`If you wish to store the current configuration with no changes to the state, use "terraform init -reconfigure".`)
